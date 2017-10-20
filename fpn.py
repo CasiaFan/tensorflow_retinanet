@@ -8,9 +8,6 @@ FPN: input shape [batch, 224, 224, 3]
         net, endpoints = fpn.fpn101(inputs,
                                     blocks=[2, 4, 23, 3],
                                     is_training=False)
-
-@ Author: Arkenstone
-@ Contact: fanzongshaoxing@gmail.com
 """
 
 from __future__ import absolute_import
@@ -42,30 +39,25 @@ def bottleneck(inputs, depth, depth_bottleneck, stride,
     """
     with tf.variable_scope(scope, 'bottleneck', [inputs]) as sc:
         depth_in = slim.utils.last_dimension(inputs.get_shape(), min_rank=4)
-        # layer1
-        residual = slim.conv2d(inputs, depth_bottleneck, [1, 1], stride=1,
-                               scope='conv1', normalizer_fn=None,
-                               activation_fn=None)
-        residual = slim.batch_norm(residual, activation_fn=tf.nn.relu, scope='conv1_bn')
-        # layer 2
-        residual = ru.conv2d_same(residual, depth_bottleneck, 3, stride=stride,
-                                    rate=rate, scope='conv2')
-        residual = slim.batch_norm(residual, activation_fn=tf.nn.relu, scope='conv2_bn')
-        # layer 3
-        residual = slim.conv2d(residual, depth, [1, 1], stride=1, scope='conv3',
-                               normalizer_fn=None, activation_fn=None)
-        residual = slim.batch_norm(residual, activation_fn=None, scope='conv3_bn')
-
+        preact = slim.batch_norm(inputs, activation_fn=tf.nn.relu, scope='preact')
         # shortcut
         if depth == depth_in:
             # identity block with no conv layer at shortcut
             shortcut = ru.subsample(inputs, stride, 'shortcut')
         else:
-            shortcut = slim.conv2d(inputs, depth, [1, 1], stride=1,
-                                   normalizer_fn=None, activation_fn=None,
-                                   scope='shortcut')
+            shortcut = slim.conv2d(preact, depth, [1, 1], stride=1, scope='shortcut')
+        # layer1
+        residual = slim.conv2d(inputs, depth_bottleneck, [1, 1], stride=1,
+                               scope='conv1', normalizer_fn=None,
+                               activation_fn=None)
+        # layer 2
+        residual = ru.conv2d_same(residual, depth_bottleneck, 3, stride=stride,
+                                    rate=rate, scope='conv2')
+        # layer 3
+        residual = slim.conv2d(residual, depth, [1, 1], stride=1, scope='conv3',
+                               normalizer_fn=None, activation_fn=None)
+
         output = shortcut + residual
-        output = slim.batch_norm(output, activation_fn=tf.nn.relu, scope='output')
         return output
 
 
@@ -153,11 +145,12 @@ def FPN(inputs,
         with slim.arg_scope([slim.conv2d, bottleneck]):
             with slim.arg_scope([slim.batch_norm], is_training=is_training):
                 c1 = ru.conv2d_same(inputs, 64, 7, stride=2, scope='conv1')
-                bn1 = slim.batch_norm(c1, scope='norm1')
+                bn1 = slim.batch_norm(c1, scope='norm1', activation_fn=tf.nn.relu)
+                mp1 = slim.max_pool2d(bn1, [3, 3], stride=2, scope='pool1', padding='SAME')
                 # Bottom up
                 # block 1, down-sampling is done in conv3_1, conv4_1, conv5_1
                 block1 = resnet_v2_block('block1', base_depth=64, num_planes=num_planes[0], stride=1)
-                c2 = stack_resnet_v2_units(bn1, block1)
+                c2 = stack_resnet_v2_units(mp1, block1)
                 # block 2
                 block2 = resnet_v2_block('block2', base_depth=128, num_planes=num_planes[1], stride=2)
                 c3 = stack_resnet_v2_units(c2, block2)
@@ -182,7 +175,7 @@ def FPN(inputs,
                 t2 = slim.conv2d_transpose(p3, num_channels, [4, 4], stride=[2, 2])
                 p2 = ru.conv2d_same(t2+l2, num_channels, 3, stride=1)
                 return p2, p3, p4, p5
-FPN.default_image_size = 512  # shorter side in COCO image set
+FPN.default_image_size = 600  # shorter side in COCO image set
 
 def FPN50(inputs,
           is_training=True,
@@ -256,7 +249,7 @@ def RetinaNet_FPN(inputs,
                 with slim.arg_scope([slim.batch_norm], is_training=is_training):
                     c1 = ru.conv2d_same(inputs, 64, 7, stride=2, scope='conv1')
                     bn1 = slim.batch_norm(c1, scope='norm1', activation_fn=tf.nn.relu)
-                    mp1 = slim.max_pool2d(bn1, [3, 3], stride=2, scope='pool1')
+                    mp1 = slim.max_pool2d(bn1, [3, 3], stride=2, scope='pool1', padding='SAME')
                     # Bottom up
                     # block 1, down-sampling is done in conv3_1, conv4_1, conv5_1
                     block1 = resnet_v2_block('block1', base_depth=64, num_planes=num_planes[0], stride=1)
@@ -270,7 +263,6 @@ def RetinaNet_FPN(inputs,
                     # block 4
                     block4 = resnet_v2_block('block4', base_depth=512, num_planes=num_planes[3], stride=2)
                     c5 = stack_resnet_v2_units(c4, block4)
-
                     # P6
                     p6 = ru.conv2d_same(c5, num_channels, 3, stride=2, scope='conv6')
                     # P7
@@ -337,3 +329,17 @@ def RetinaNet_FPN200(inputs,
                reuse=reuse,
                scope=scope)
 RetinaNet_FPN200.default_image_size = FPN.default_image_size
+
+
+def test():
+    inputs = tf.Variable(tf.random_normal([2, 224, 224, 3]), name='inputs')
+    fms = FPN101(inputs)
+    init_op = tf.global_variables_initializer()
+    with tf.Session() as sess:
+        sess.run(init_op)
+        for fm in fms:
+            print(fm)
+    sess.close()
+
+if __name__ == "__main__":
+    test()
