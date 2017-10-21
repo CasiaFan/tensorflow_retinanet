@@ -13,7 +13,7 @@ class MultipleGridAnchorGenerator():
 
   def __init__(self,
                box_specs_list,
-               base_anchor_size=None,
+               base_anchor_sizes,
                clip_window=None):
     """Constructs a MultipleGridAnchorGenerator.
 
@@ -33,8 +33,7 @@ class MultipleGridAnchorGenerator():
       box_specs_list: list of list of (scale, aspect ratio) pairs with the
         outside list having the same number of entries as feature_map_shape_list
         (which is passed in at generation time).
-      base_anchor_size: base anchor size as [height, width]
-                        (length-2 float tensor, default=[256, 256]).
+      base_anchor_sizes: list of base anchor size in each layer
       clip_window: a tensor of shape [4] specifying a window to which all
         anchors should be clipped. If clip_window is None, then no clipping
         is performed.
@@ -49,9 +48,10 @@ class MultipleGridAnchorGenerator():
     else:
       raise ValueError('box_specs_list is expected to be a '
                        'list of lists of pairs')
-    if base_anchor_size is None:
-      base_anchor_size = tf.constant([256, 256], dtype=tf.float32)
-    self._base_anchor_size = base_anchor_size
+    if isinstance(base_anchor_sizes, list):
+        self._base_anchor_sizes = base_anchor_sizes
+    else:
+        raise ValueError('base_anchor_list is expected to be a list of float')
     if clip_window is not None and clip_window.get_shape().as_list() != [4]:
       raise ValueError('clip_window must either be None or a shape [4] tensor')
     self._clip_window = clip_window
@@ -79,9 +79,8 @@ class MultipleGridAnchorGenerator():
     return [len(box_specs) for box_specs in self._box_specs]
 
   def generate(self,
+                input_size,
                 feature_map_shape_list,
-                im_height=1,
-                im_width=1,
                 anchor_strides=None,
                 anchor_offsets=None):
     """Generates a collection of bounding boxes to be used as anchors.
@@ -97,18 +96,11 @@ class MultipleGridAnchorGenerator():
     index, then height index, then grid index).
 
     Args:
+      input_size: input image size list with (width, height)
       feature_map_shape_list: list of pairs of conv net layer resolutions in the
         format [(height_0, width_0), (height_1, width_1), ...]. For example,
         setting feature_map_shape_list=[(8, 8), (7, 7)] asks for anchors that
         correspond to an 8x8 layer followed by a 7x7 layer.
-      im_height: the height of the image to generate the grid for. If both
-        im_height and im_width are 1, the generated anchors default to
-        normalized coordinates, otherwise absolute coordinates are used for the
-        grid.
-      im_width: the width of the image to generate the grid for. If both
-        im_height and im_width are 1, the generated anchors default to
-        normalized coordinates, otherwise absolute coordinates are used for the
-        grid.
       anchor_strides: list of pairs of strides (in y and x directions
         respectively). For example, setting
         anchor_strides=[(.25, .25), (.5, .5)] means that we want the anchors
@@ -144,6 +136,7 @@ class MultipleGridAnchorGenerator():
     if not all([isinstance(list_item, tuple) and len(list_item) == 2
                 for list_item in feature_map_shape_list]):
       raise ValueError('feature_map_shape_list must be a list of pairs.')
+    im_height, im_width = input_size[0], input_size[1]
     if not anchor_strides:
       anchor_strides = [(tf.to_float(im_height) / tf.to_float(pair[0]),
                          tf.to_float(im_width) / tf.to_float(pair[1]))
@@ -161,11 +154,9 @@ class MultipleGridAnchorGenerator():
         raise ValueError('%s must be a list of pairs.' % arg_name)
 
     anchor_grid_list = []
-    min_im_shape = tf.to_float(tf.minimum(im_height, im_width))
-    base_anchor_size = min_im_shape * self._base_anchor_size
-    for grid_size, scales, aspect_ratios, stride, offset in zip(
+    for grid_size, scales, aspect_ratios, stride, offset, base_anchor_size in zip(
         feature_map_shape_list, self._scales, self._aspect_ratios,
-        anchor_strides, anchor_offsets):
+        anchor_strides, anchor_offsets, self._base_anchor_sizes):
       anchor_grid_list.append(
           tile_anchors(
               grid_height=grid_size[0],
@@ -224,8 +215,8 @@ def tile_anchors(grid_height,
     aspect_ratios: a 1-d (float) tensor representing the aspect ratio of each
       box in the basis set.  The length of the scales and aspect_ratios tensors
       must be equal.
-    base_anchor_size: base anchor size as [height, width]
-      (float tensor of shape [2])
+    base_anchor_size: base anchor size in this layer as [height, width]
+        (float tensor of shape [2])
     anchor_stride: difference in centers between base anchors for adjacent grid
                    positions (float tensor of shape [2])
     anchor_offset: center of the anchor with scale and aspect ratio 1 for the
@@ -237,9 +228,8 @@ def tile_anchors(grid_height,
     a BoxList holding a collection of N anchor boxes
   """
   ratio_sqrts = tf.sqrt(aspect_ratios)
-  heights = scales / ratio_sqrts * base_anchor_size[0]
-  widths = scales * ratio_sqrts * base_anchor_size[1]
-
+  heights = scales / ratio_sqrts * base_anchor_size
+  widths = scales * ratio_sqrts * base_anchor_size
   # Get a grid of box centers
   y_centers = tf.to_float(tf.range(grid_height))
   y_centers = y_centers * anchor_stride[0] + anchor_offset[0]
@@ -275,7 +265,7 @@ def create_retinanet_anchors(
                        num_layers=5,
                        scales=(1.0, pow(2, 1./3), pow(2, 2./3)),
                        aspect_ratios=(0.5, 1.0, 2.0),
-                       anchor_sizes=(32.0, 64.0, 128.0, 256.0, 512.0)):
+                       base_anchor_sizes=(32.0, 64.0, 128.0, 256.0, 512.0)):
     """Create a set of anchors walking along a grid in a collection of feature maps in RetinaNet.
 
     This op creates a set of anchor boxes by placing a basis collection of
@@ -287,29 +277,29 @@ def create_retinanet_anchors(
         num_layers: The number of grid layers to create anchors
         scales: A list of scales
         aspect_ratios: A list of aspect ratios
-        anchor_sizes: List of anchor sizes in each layer
+        base_anchor_sizes: List of base anchor sizes in each layer
     Returns:
         A MultipleGridAnchorGenerator
     """
-    base_anchor_side = anchor_sizes[-1]
-    base_anchor_size = tf.cast([base_anchor_side, base_anchor_side], dtype=tf.float32)
-    base_anchor_area = base_anchor_side * base_anchor_side
+    base_anchor_sizes = list(base_anchor_sizes)
     box_spec_list = []
     for idx in range(num_layers):
-        scales = [scale * pow(anchor_sizes[idx], 2) / base_anchor_area
-                  for scale in scales]
-        layer_spec_list = zip(scales, aspect_ratios)
+        layer_spec_list = []
+        for scale in scales:
+            for aspect_ratio in aspect_ratios:
+                layer_spec_list.append((scale, aspect_ratio))
         box_spec_list.append(layer_spec_list)
-    return MultipleGridAnchorGenerator(box_spec_list, base_anchor_size)
+    return MultipleGridAnchorGenerator(box_spec_list, base_anchor_sizes)
 
 def test():
     input_size = [224, 224]
     feature_maps = [(tf.ceil(input_size[0]/pow(2., i+3)), tf.ceil(input_size[1]/pow(2., i+3))) for i in range(5)]
     anchor_generator = create_retinanet_anchors()
-    anchors = anchor_generator.generate(feature_maps)
+    anchors = anchor_generator.generate(input_size, feature_maps)
     with tf.Session() as sess:
-        print(anchors)
-        print(sess.run(tf.shape(anchors.get())))
+        result = anchors.get()
+        print(sess.run(result))
+        print(sess.run(tf.shape(result)))
     sess.close()
 
 # test()
