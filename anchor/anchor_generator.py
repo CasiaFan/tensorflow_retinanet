@@ -291,6 +291,42 @@ def create_retinanet_anchors(
         box_spec_list.append(layer_spec_list)
     return MultipleGridAnchorGenerator(box_spec_list, base_anchor_sizes)
 
+
+def anchor_assign(anchors, gt_boxes, gt_labels, is_training=True):
+    """
+    Assign generated anchors to boxes and labels
+    Args:
+        anchors: BoxList holding a collection of N anchors
+        gt_boxes: Groundtruth 2D box coordinates tensor/list [#object, 4] ([ymin, xmin, xmax, ymax], float type) of objects in given input image.
+        gt_labels: Groundtruth 1D tensor/list [#object] (scalar int) of objects in given image.
+        is_training: is training or not
+
+    returns:
+        BoxList with anchor location and class fields
+    """
+    pos_iou_thred = 0.5
+    neg_iou_thred = 0.5
+    if is_training:
+        neg_iou_thred = 0.4
+
+    anchors_box = anchors.get()
+    box_iou = box_list_ops.iou(anchors_box, gt_boxes)
+    # get max iou ground truth box of each anchor
+    anchor_max_iou = tf.reduce_max(box_iou, axis=1)
+    anchor_max_iou_indices = tf.argmax(box_iou, axis=1)
+    anchor_gt_box = gt_boxes[anchor_max_iou_indices]
+    # add background category
+    anchor_gt_cls = gt_labels[anchor_max_iou_indices] + 1
+    # get remaining index with iou between 0.4 to 0.5
+    remain_indices = (anchor_max_iou >= pos_iou_thred) | (anchor_max_iou <= neg_iou_thred)
+    anchor_gt_cls = tf.boolean_mask(anchor_gt_cls, remain_indices)
+    anchor_gt_box = tf.boolean_mask(anchor_gt_box, remain_indices)
+    anchor_gt_cls = tf.where(tf.greater(anchor_gt_cls, pos_iou_thred), anchor_gt_cls, tf.zeros_like(anchor_gt_cls))
+    anchors.set_field('boxes', anchor_gt_box)
+    anchors.set_field('labels', anchor_gt_cls)
+    return anchors
+
+
 def test():
     input_size = [224, 224]
     feature_maps = [(tf.ceil(input_size[0]/pow(2., i+3)), tf.ceil(input_size[1]/pow(2., i+3))) for i in range(5)]
