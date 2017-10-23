@@ -2,7 +2,7 @@ from __future__ import print_function
 from __future__ import absolute_import
 from __future__ import division
 
-from fpn import RetinaNet_FPN101, FPN101
+from fpn import RetinaNet_FPN101
 import tensorflow as tf
 
 slim = tf.contrib.slim
