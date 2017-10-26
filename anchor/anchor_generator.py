@@ -296,7 +296,8 @@ def anchor_assign(anchors, gt_boxes, gt_labels, is_training=True):
     Assign generated anchors to boxes and labels
     Args:
         anchors: BoxList holding a collection of N anchors
-        gt_boxes: Groundtruth 2D box coordinates tensor/list [#object, 4] ([ymin, xmin, xmax, ymax], float type) of objects in given input image.
+        gt_boxes: BoxList holding a collection of groundtruth 2D box coordinates tensor/list [#object, 4]
+            ([ymin, xmin, xmax, ymax], float type) of objects in given input image.
         gt_labels: Groundtruth 1D tensor/list [#object] (scalar int) of objects in given image.
         is_training: is training or not
 
@@ -308,21 +309,19 @@ def anchor_assign(anchors, gt_boxes, gt_labels, is_training=True):
     if is_training:
         neg_iou_thred = 0.4
 
-    anchors_box = anchors.get()
-    box_iou = box_list_ops.iou(anchors_box, gt_boxes)
+    box_iou = box_list_ops.iou(anchors, gt_boxes)
     # get max iou ground truth box of each anchor
     anchor_max_iou = tf.reduce_max(box_iou, axis=1)
     anchor_max_iou_indices = tf.argmax(box_iou, axis=1)
-    anchor_gt_box = gt_boxes[anchor_max_iou_indices]
+    anchor_gt_box = tf.gather(gt_boxes.get(), anchor_max_iou_indices)
     # add background category
-    anchor_gt_cls = gt_labels[anchor_max_iou_indices] + 1
+    anchor_gt_cls = tf.gather(gt_labels, anchor_max_iou_indices)
     # get remaining index with iou between 0.4 to 0.5
-    remain_indices = (anchor_max_iou >= pos_iou_thred) | (anchor_max_iou <= neg_iou_thred)
-    anchor_gt_cls = tf.boolean_mask(anchor_gt_cls, remain_indices)
-    anchor_gt_box = tf.boolean_mask(anchor_gt_box, remain_indices)
-    anchor_gt_cls = tf.where(tf.greater(anchor_gt_cls, pos_iou_thred), anchor_gt_cls, tf.zeros_like(anchor_gt_cls))
-    anchors.set_field('boxes', anchor_gt_box)
-    anchors.set_field('labels', anchor_gt_cls)
+    # modify ignored labels to -1 and background labels to 0
+    anchor_gt_cls = tf.where(tf.greater(anchor_max_iou, pos_iou_thred), anchor_gt_cls, 0-tf.ones_like(anchor_gt_cls))
+    anchor_gt_cls = tf.where(tf.less(anchor_max_iou, neg_iou_thred), tf.zeros_like(anchor_gt_cls), anchor_gt_cls)
+    anchors.add_field('gt_boxes', anchor_gt_box)
+    anchors.add_field('gt_labels', anchor_gt_cls)
     return anchors
 
 
@@ -331,10 +330,17 @@ def test():
     feature_maps = [(tf.ceil(input_size[0]/pow(2., i+3)), tf.ceil(input_size[1]/pow(2., i+3))) for i in range(5)]
     anchor_generator = create_retinanet_anchors()
     anchors = anchor_generator.generate(input_size, feature_maps)
+    gt_boxes = box_list.BoxList(tf.convert_to_tensor([[10, 10, 150, 150], [30, 40, 60, 70]], dtype=tf.float32))
+    gt_labels = tf.convert_to_tensor([1, 2])
+    anchors = anchor_assign(anchors, gt_boxes, gt_labels)
+    x = tf.convert_to_tensor([[[1,2,3],[3,4,5],[5,6,7]],[[1,2,3],[3,4,5],[5,6,7]]])
     with tf.Session() as sess:
-        result = anchors.get()
+        result = anchors.get_field("gt_labels")
+        # result = anchors.get()
         print(sess.run(result))
         print(sess.run(tf.shape(result)))
+        print(sess.run(tf.squeeze(tf.where(tf.greater(gt_labels, 1)))))
+        print(sess.run(tf.gather(x, tf.convert_to_tensor([0,1]), axis=1)))
     sess.close()
 
 if __name__ == "__main__":

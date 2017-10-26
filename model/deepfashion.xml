@@ -1,0 +1,14 @@
+<annotation>
+    <category>
+        <id>1</id>
+        <name>Up</name>
+    </category>
+    <category>
+        <id>2</id>
+        <name>Down</name>
+    </category>
+    <category>
+        <id>3</id>
+        <name>Full</name>
+    </category>
+</annotation>
