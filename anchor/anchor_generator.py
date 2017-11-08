@@ -335,7 +335,7 @@ def test():
     anchors = anchor_assign(anchors, gt_boxes, gt_labels)
     x = tf.convert_to_tensor([[[1,2,3],[3,4,5],[5,6,7]],[[1,2,3],[3,4,5],[5,6,7]]])
     with tf.Session() as sess:
-        result = anchors.get_field("gt_labels")
+        result = anchors.get_field("gt_boxes")
         # result = anchors.get()
         print(sess.run(result))
         print(sess.run(tf.shape(result)))

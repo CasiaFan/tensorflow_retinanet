@@ -37,7 +37,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))+"/..")
 from lxml import etree
 import PIL.Image
 import tensorflow as tf
-
 import dataset_util
 
 flags = tf.app.flags
@@ -47,22 +46,6 @@ flags.DEFINE_string('label_map_path', '',
                     'Path to label map proto, like model/deepfashion.xml')
 flags.DEFINE_string('mode', '', 'generate train or val output: train/val')
 FLAGS = flags.FLAGS
-
-def get_label_map_dict(label_map_path):
-    """
-    Read in dataset category name vs id mapping
-    Args:
-        xml file path which containing category name and ip information
-    returns:
-        Dict containing name to id mapping
-    """
-    tree = etree.parse(open(label_map_path, "r"))
-    name_id_mapping = {}
-    for node in tree.xpath("category"):
-        cate_name = node.findtext("name")
-        cate_id = node.findtext("id")
-        name_id_mapping[cate_name] = cate_id
-    return name_id_mapping
 
 
 def dict_to_tf_example(data,
@@ -186,7 +169,7 @@ def main(_):
     mode = FLAGS.mode
     assert mode in ["train", "val"]
     print "Generate data for model {}!".format(mode)
-    label_map_dict = get_label_map_dict(FLAGS.label_map_path)
+    label_map_dict = dataset_util.get_label_map_dict(FLAGS.label_map_path)
 
     image_dir = os.path.join(data_dir, 'JPEGImages')
     annotations_dir = os.path.join(data_dir, 'Annotations')

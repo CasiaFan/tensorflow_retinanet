@@ -16,6 +16,7 @@
 """Utility functions for creating TFRecord data sets."""
 
 import tensorflow as tf
+from lxml import etree
 
 def int64_feature(value):
   return tf.train.Feature(int64_list=tf.train.Int64List(value=[value]))
@@ -83,3 +84,20 @@ def recursive_parse_xml_to_dict(xml):
         result[child.tag] = []
       result[child.tag].append(child_result[child.tag])
   return {xml.tag: result}
+
+
+def get_label_map_dict(label_map_path):
+    """
+    Read in dataset category name vs id mapping
+    Args:
+        xml file path which containing category name and ip information
+    returns:
+        Dict containing name to id mapping
+    """
+    tree = etree.parse(open(label_map_path, "r"))
+    name_id_mapping = {}
+    for node in tree.xpath("category"):
+        cate_name = node.findtext("name")
+        cate_id = node.findtext("id")
+        name_id_mapping[cate_name] = cate_id
+    return name_id_mapping

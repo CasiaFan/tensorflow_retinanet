@@ -32,7 +32,7 @@ def focal_loss(onehot_labels, cls_preds,
         epsilon = 1e-8
         alpha_t = tf.scalar_mul(alpha, tf.ones_like(onehot_labels, dtype=tf.float32))
         alpha_t = tf.where(tf.equal(onehot_labels, 1.0), alpha_t, 1-alpha_t)
-        losses = tf.reduce_sum(-alpha_t * tf.pow(1. - predictions_pt, gamma) * onehot_labels * tf.log(predictions_pt+epsilon),
+        losses = tf.reduce_sum(-alpha_t * tf.pow(1. - predictions_pt, gamma) * tf.log(predictions_pt+epsilon),
                                      name=name, axis=1)
         return losses
 
@@ -61,4 +61,4 @@ def test():
         print sess.run(regression_loss(logits, bbox, tf.expand_dims(1./tf.convert_to_tensor([2, 3], dtype=tf.float32), 1)))
     sess.close()
 
-test()
+# test()

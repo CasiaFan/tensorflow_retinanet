@@ -34,6 +34,24 @@ from anchor import box_list
 
 EPSILON = 1e-8
 
+def get_center_coordinates_and_sizes(box_corners, scope=None):
+    """Computes the center coordinates, height and width of the boxes.
+
+    Args:
+      box_corners: Tensor of N boxes
+      scope: name scope of the function.
+
+    Returns:
+      a list of 4 1-D tensors [ycenter, xcenter, height, width].
+    """
+    with tf.name_scope(scope, 'get_center_coordinates_and_sizes'):
+      ymin, xmin, ymax, xmax = tf.unstack(tf.transpose(box_corners))
+      width = xmax - xmin
+      height = ymax - ymin
+      ycenter = ymin + height / 2.
+      xcenter = xmin + width / 2.
+      return [ycenter, xcenter, height, width]
+
 
 class FasterRCNNBoxCoder():
   """Faster RCNN box coder."""
@@ -60,16 +78,16 @@ class FasterRCNNBoxCoder():
     """Encode a box collection with respect to anchor collection.
 
     Args:
-      boxes: BoxList holding N boxes to be encoded.
-      anchors: BoxList of anchors.
+      boxes: Tensor holding N boxes to be encoded.
+      anchors: Tensor of corresponding N anchors.
 
     Returns:
       a tensor representing N anchor-encoded boxes of the format
       [ty, tx, th, tw].
     """
     # Convert anchors to the center coordinate representation.
-    ycenter_a, xcenter_a, ha, wa = anchors.get_center_coordinates_and_sizes()
-    ycenter, xcenter, h, w = boxes.get_center_coordinates_and_sizes()
+    ycenter_a, xcenter_a, ha, wa = get_center_coordinates_and_sizes(anchors)
+    ycenter, xcenter, h, w = get_center_coordinates_and_sizes(boxes)
     # Avoid NaN in division and log below.
     ha += EPSILON
     wa += EPSILON
@@ -98,7 +116,7 @@ class FasterRCNNBoxCoder():
     Returns:
       boxes: BoxList holding N bounding boxes.
     """
-    ycenter_a, xcenter_a, ha, wa = anchors.get_center_coordinates_and_sizes()
+    ycenter_a, xcenter_a, ha, wa = get_center_coordinates_and_sizes(anchors)
 
     ty, tx, th, tw = tf.unstack(tf.transpose(rel_codes))
     if self._scale_factors:
@@ -115,4 +133,3 @@ class FasterRCNNBoxCoder():
     ymax = ycenter + h / 2.
     xmax = xcenter + w / 2.
     return box_list.BoxList(tf.transpose(tf.stack([ymin, xmin, ymax, xmax])))
-

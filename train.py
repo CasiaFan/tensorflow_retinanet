@@ -1,10 +1,15 @@
 from retinanet import RetinaNet
 from loss import focal_loss, regression_loss
 from utils.preprocess import preprocess
+from utils import model_deploy
 from model_config import config
 from anchor.anchor_generator import create_retinanet_anchors, anchor_assign
+from anchor.box_coder import FasterRCNNBoxCoder
+from data_generator.input_generator import input_queue_generator
+from data_generator.dataset_util import get_label_map_dict
 
 import tensorflow as tf
+from functools import partial
 
 slim = tf.contrib.slim
 
@@ -20,9 +25,12 @@ def _get_inputs(input_queue, num_classes, is_training=True):
     locations_list: a list of tensors of shape [num_boxes, 4]
       containing the corners of the groundtruth boxes.
     classes_list: a list of padded one-hot tensors containing target classes.
+    anchor_list: a list of anchors containing anchors
   """
   read_data_list = input_queue.dequeue()
   label_id_offset = 0  # class index starts from 1, 0 means background
+  # anchor encoder
+  anchor_encoder = FasterRCNNBoxCoder()
   def extract_images_and_targets(read_data):
     image = read_data['image']
     location_gt = read_data['groundtruth_boxes']
@@ -40,24 +48,27 @@ def _get_inputs(input_queue, num_classes, is_training=True):
         input_size = tf.shape(image[i])
         feature_map_list = [(tf.ceil(input_size[0]/pow(2., i+3)), tf.ceil(input_size[1]/pow(2., i+3))) for i in range(5)]
         anchor_generator = create_retinanet_anchors()
-        anchor = anchor_generator.generatr(input_size, feature_map_list)
+        anchor = anchor_generator.geznerate(input_size, feature_map_list)
         anchor = anchor_assign(anchor, gt_boxes=location_gt[i], gt_labels=classes_gt[i], is_training=is_training)
+        # encode anchor boxes
+        gt_boxes = anchor.get_field('gt_boxes')
+        encoded_gt_boxes = anchor_encoder.encode(gt_boxes, anchor.get())
+        anchor.set_field('encoded_gt_boxes', encoded_gt_boxes)
         anchors_list.append(anchor)
     return image, location_gt, classes_onehot, anchors_list
   return zip(*map(extract_images_and_targets, read_data_list))
 
 
-def _create_losses(input_queue, num_classes, anchors):
+def _create_losses(input_queue, num_classes):
   """Creates loss function for a DetectionModel.
 
   Args:
     input_queue: BatchQueue object holding enqueued tensor_dicts.
     num_classes: num of classes, integer
-    anchors: anchors list generated in given image batch, [#batch]
   Returns:
     Average sum of loss of given input batch samples with shape
   """
-  (images, groundtruth_boxes_list, groundtruth_classes_list) = _get_inputs(input_queue, num_classes)
+  (images, groundtruth_boxes_list, groundtruth_classes_list, anchors_list) = _get_inputs(input_queue, num_classes)
   images = [preprocess(image, im_width=config.MODEL.IM_WIDTH,
                        im_height=config.MODEL.IM_HEIGHT,
                        preprocess_options=config.TRAIN.PREPROCESS) for image in images]
@@ -65,9 +76,9 @@ def _create_losses(input_queue, num_classes, anchors):
   net = RetinaNet()
   loc_preds, cls_preds = net(images, num_classes+1, anchors=9)
   # get num of anchor overlapped with ground truth box
-  cls_gt = [anchor.get_field("gt_labels") for anchor in anchors]
-  loc_gt = [anchor.get_field("gt_boxes") for anchor in anchors]
-  # pos anchor count
+  cls_gt = [anchor.get_field("gt_labels") for anchor in anchors_list]
+  loc_gt = [anchor.get_field("gt_encoded_boxes") for anchor in anchors_list]
+  # pos anchor count for each image
   gt_anchor_nums = tf.map_fn(lambda x: tf.reduce_sum(tf.cast(tf.greater(x, 0), tf.int32)), cls_gt)
   # get valid anchor indices
   valid_anchor_indices = tf.squeeze(tf.where(tf.greater_equal(cls_gt, 0)))
@@ -80,22 +91,20 @@ def _create_losses(input_queue, num_classes, anchors):
   valid_cls_indices = tf.squeeze(tf.where(tf.greater(cls_gt, 0)))
   # skip negative and ignored anchors
   [valid_loc_preds, valid_loc_gt] = map(lambda x: tf.gather(x, valid_cls_indices, axis=1),
-                                           [cls_preds, cls_gt])
+                                           [loc_preds, loc_gt])
   loc_loss = regression_loss(valid_loc_preds, valid_loc_gt, weights=tf.expand_dims(1./tf.to_float(gt_anchor_nums), 1))
   loss = (tf.reduce_sum(loc_loss) + tf.reduce_sum(cls_loss)) / tf.size(gt_anchor_nums, out_type=tf.float32)
   return loss
 
 
-def train(create_tensor_dict_fn, create_model_fn, train_config, master, task,
-          num_clones, worker_replicas, clone_on_cpu, ps_tasks, worker_job_name,
-          is_chief, train_dir):
+def train(train_config, train_dir, master, task=0,
+          num_clones=1, worker_replicas=1, clone_on_cpu=False, ps_tasks=0, worker_job_name='lonely_worker',
+          is_chief=True):
   """Training function for detection models.
 
   Args:
-    create_tensor_dict_fn: a function to create a tensor input dictionary.
-    create_model_fn: a function that creates a DetectionModel and generates
-                     losses.
-    train_config: a train_pb2.TrainConfig protobuf.
+    train_config: configuration of parameters for model training.
+    train_dir: Directory to write checkpoints and training summaries to.
     master: BNS name of the TensorFlow master to use.
     task: The task id of this training instance.
     num_clones: The number of clones to run per machine.
@@ -104,13 +113,7 @@ def train(create_tensor_dict_fn, create_model_fn, train_config, master, task,
     ps_tasks: Number of parameter server tasks.
     worker_job_name: Name of the worker job.
     is_chief: Whether this replica is the chief replica.
-    train_dir: Directory to write checkpoints and training summaries to.
   """
-
-  detection_model = create_model_fn()
-  data_augmentation_options = [
-      preprocessor_builder.build(step)
-      for step in train_config.data_augmentation_options]
 
   with tf.Graph().as_default():
     # Build a configuration specifying multi-GPU and multi-replicas.
@@ -127,19 +130,15 @@ def train(create_tensor_dict_fn, create_model_fn, train_config, master, task,
       global_step = slim.create_global_step()
 
     with tf.device(deploy_config.inputs_device()):
-      input_queue = _create_input_queue(train_config.batch_size // num_clones,
-                                        create_tensor_dict_fn,
-                                        train_config.batch_queue_capacity,
-                                        train_config.num_batch_queue_threads,
-                                        train_config.prefetch_queue_capacity,
-                                        data_augmentation_options)
-
+      train_config.batch_size = train_config.batch_size // num_clones
+      input_queue = input_queue_generator(train_config)
     # Gather initial summaries.
     summaries = set(tf.get_collection(tf.GraphKeys.SUMMARIES))
     global_summaries = set([])
 
-    model_fn = functools.partial(_create_losses,
-                                 create_model_fn=create_model_fn)
+    # get num of classes
+    num_classes = get_label_map_dict(train_config.TRAIN.label_map_file)
+    model_fn = partial(_create_losses, num_classes)
     clones = model_deploy.create_clones(deploy_config, model_fn, [input_queue])
     first_clone_scope = clones[0].scope
 

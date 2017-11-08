@@ -1,19 +1,19 @@
 import collections
 import tensorflow as tf
 from utils.preprocess import preprocess
+
 slim_example_decoder = tf.contrib.slim.tfexample_decoder
 parallel_reader = tf.contrib.slim.parallel_reader
 
 
 def input_queue_generator(input_reader_config):
     """
-    input_reader_config:
-        input path: tf record file path
-        num_epochs: epoch of training input images, default is None (loop infinitely)
-        num_readers: integer, the num of Readers to create
-        shuffle: boolean, use RandomShuffleQueue to shuffle files and records
-        capacity: integer, capacity of queue
-        min_after_dequeue: integer, min number of records after dequeue
+    input_reader_config: a dict configure the input reader
+    input path: tf record file path
+    num_epochs: epoch of training input images, default is None (loop infinitely)
+    num_readers: integer, the num of Readers to create
+    shuffle: boolean, use RandomShuffleQueue to shuffle files and records
+    capacity: integer, capacity of queue
     """
     _, string_tensor = parallel_reader.parallel_read(
         input_reader_config.input_path,
@@ -23,14 +23,14 @@ def input_queue_generator(input_reader_config):
         num_readers=input_reader_config.num_readers,
         shuffle=input_reader_config.shuffle,
         dtypes=[tf.string, tf.string],
-        capacity=input_reader_config.queue_capacity,
-        min_after_dequeue=input_reader_config.min_after_dequeue)
+        capacity=input_reader_config.queue_capacity)
 
     tensor_dict = TfExampleDecoder().decode(string_tensor)
     # input image (convert to float32 type)
     tensor_dict['image'] = tf.to_float(tf.expand_dims(tensor_dict['image'], 0))
     if input_reader_config.data_augmentation_ops:
-        tensor_dict = preprocess(tensor_dict, input_reader_config.data_augmentation_ops)
+        tensor_dict = preprocess(tensor_dict, input_reader_config.im_height, input_reader_config.im_width,
+                                 input_reader_config.data_augmentation_ops)
     input_queue = BatchQueue(
         tensor_dict,
         batch_size=input_reader_config.batch_size,
