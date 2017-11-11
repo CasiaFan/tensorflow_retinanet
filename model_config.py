@@ -12,18 +12,10 @@ config.MODEL.max_detection = 1000
 
 # training config
 config.TRAIN = edict()
-# batch size
-config.TRAIN.batch_size = 4
-# initial learning rate
-config.TRAIN.lr = 0.01
-# momentum
-config.TRAIN.momentum = 0.9
-# num of training steps
-config.TRAIN.num_steps = 500000
 # preprocess option
 config.TRAIN.data_augmentation_ops = ['random_horizontal_flip']
 # fine tune checkpoint file
-config.TRAIN.fine_tune_ckpt_path = ""
+config.TRAIN.fine_tune_checkpoint = ""
 # train input tf record file
 config.TRAIN.train_file_path = "train.record"
 # eval input tf record file
@@ -47,3 +39,13 @@ config.TRAIN.prefetch_queue_capacity = 10
 # input training image size
 config.TRAIN.im_height = 600
 config.TRAIN.im_width = 800
+# optimizer during training, only rms_prop_optimizer, momentum_optimizer, adam_optimizer
+config.TRAIN.optimizer = "rms_prop_optimizer"
+# initial learning rate
+config.TRAIN.lr = 0.01
+# batch size
+config.TRAIN.batch_size = 4
+# num of training steps
+config.TRAIN.num_steps = 500000
+# num of decay steps
+config.TRAIN.decay_steps = 10000
