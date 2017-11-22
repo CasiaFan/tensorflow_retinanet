@@ -47,86 +47,6 @@ back to rank 4.
 
 import tensorflow as tf
 
-def preprocess(tensor_dict, im_height, im_width, preprocess_options):
-  """Preprocess images and bounding boxes.
-
-  Various types of preprocessing (to be implemented) based on the
-  preprocess_options dictionary e.g. "crop image" (affects image and possibly
-  boxes), "white balance image" (affects only image), etc. If self._options
-  is None, no preprocessing is done.
-
-  Args:
-    tensor_dict: dictionary that contains images, boxes, and can contain other
-                 things as well.
-                 images-> rank 4 float32 tensor contains
-                          1 image -> [1, height, width, 3].
-                          with pixel values varying between [0, 1]
-                 boxes-> rank 2 float32 tensor containing
-                         the bounding boxes -> [N, 4].
-                         Boxes are in normalized form meaning
-                         their coordinates vary between [0, 1].
-                         Each row is in the form
-                         of [ymin, xmin, ymax, xmax].
-    preprocess_options: It is a list of tuples, where each tuple contains a
-                        function and a dictionary that contains arguments and
-                        their values.
-  Returns:
-    tensor_dict: which contains the preprocessed images, bounding boxes, etc.
-
-  Raises:
-    ValueError: (a) If the functions passed to Preprocess
-                    are not in func_arg_map.
-                (b) If the arguments that a function needs
-                    do not exist in tensor_dict.
-                (c) If image in tensor_dict is not rank 4
-  """
-  # mapping from preprocessing functions to arguments
-  func_arg_map = _get_default_func_arg_map()
-  # changes the images to image (rank 4 to rank 3) since the functions
-  # receive rank 3 tensor for image
-  if 'image' in tensor_dict:
-    images = tensor_dict['image']
-    if len(images.get_shape()) != 4:
-      raise ValueError('images in tensor_dict should be rank 4')
-    image = tf.squeeze(images, squeeze_dims=[0])
-    # resize image
-    image = resize_image(image, new_height=im_height, new_width=im_width)
-    # preprocess pixels
-    image = _preprocess_pixel_value(image)
-    tensor_dict['image'] = image
-
-  # Preprocess inputs based on preprocess_options
-  for option in preprocess_options:
-    func, params = option
-    if func not in func_arg_map:
-      raise ValueError('The function %s does not exist in func_arg_map' %
-                       (func.__name__))
-    arg_names = func_arg_map[func]
-    for a in arg_names:
-      if a is not None and a not in tensor_dict:
-        raise ValueError('The function %s requires argument %s' %
-                         (func.__name__, a))
-
-    def get_arg(key):
-      return tensor_dict[key] if key is not None else None
-    args = [get_arg(a) for a in arg_names]
-    results = func(*args, **params)
-    if not isinstance(results, (list, tuple)):
-      results = (results,)
-    # Removes None args since the return values will not contain those.
-    arg_names = [arg_name for arg_name in arg_names if arg_name is not None]
-    for res, arg_name in zip(results, arg_names):
-      tensor_dict[arg_name] = res
-
-  # changes the image to images (rank 3 to rank 4) to be compatible to what
-  # we received in the first place
-  if 'image' in tensor_dict:
-    image = tensor_dict['image']
-    images = tf.expand_dims(image, 0)
-    tensor_dict['image'] = images
-
-  return tensor_dict
-
 
 def _get_default_func_arg_map():
   """Returns the default mapping from a preprocessor function to its args.
@@ -651,3 +571,101 @@ def random_jitter_boxes(boxes, ratio=0.05, seed=None):
     distorted_boxes = tf.reshape(distorted_boxes, boxes_shape)
 
     return distorted_boxes
+
+
+preprocess_options_map = {
+    'normalize_image': (normalize_image, {'original_minval': 0,
+                        'original_maxval': 255,
+                        'target_minval': 0,
+                        'target_maxval': 1}),
+    'random_horizontal_flip': (random_horizontal_flip, {}),
+    'random_vertical_flip': (random_vertical_flip, {}),
+    'subtract_channel_mean': (subtract_channel_mean, {}),
+    'random_pixel_value_scale': (random_pixel_value_scale, {}),
+    'random_image_scale': (random_image_scale, {}),
+    'random_rgb_to_gray': (random_rgb_to_gray, {}),
+    'random_adjust_brightness': (random_adjust_brightness, {}),
+    'random_adjust_contrast': (random_adjust_contrast, {}),
+    'random_adjust_hue': (random_adjust_hue, {}),
+    'random_adjust_saturation': (random_adjust_saturation, {}),
+    'random_distort_color': (random_distort_color, {}),
+    'random_jitter_boxes': (random_jitter_boxes, {})
+}
+
+def preprocess(tensor_dict, preprocess_options, im_height=224, im_width=224):
+  """Preprocess images and bounding boxes.
+
+  Various types of preprocessing (to be implemented) based on the
+  preprocess_options dictionary e.g. "crop image" (affects image and possibly
+  boxes), "white balance image" (affects only image), etc. If self._options
+  is None, no preprocessing is done.
+
+  Args:
+    tensor_dict: dictionary that contains images, boxes, and can contain other
+                 things as well.
+                 images-> rank 4 float32 tensor contains
+                          1 image -> [1, height, width, 3].
+                          with pixel values varying between [0, 1]
+                 boxes-> rank 2 float32 tensor containing
+                         the bounding boxes -> [N, 4].
+                         Boxes are in normalized form meaning
+                         their coordinates vary between [0, 1].
+                         Each row is in the form
+                         of [ymin, xmin, ymax, xmax].
+    preprocess_options: It is a list each contains a function name.
+  Returns:
+    tensor_dict: which contains the preprocessed images, bounding boxes, etc.
+
+  Raises:
+    ValueError: (a) If the functions passed to Preprocess
+                    are not in func_arg_map.
+                (b) If the arguments that a function needs
+                    do not exist in tensor_dict.
+                (c) If image in tensor_dict is not rank 4
+  """
+  # mapping from preprocessing functions to arguments
+  func_arg_map = _get_default_func_arg_map()
+  # changes the images to image (rank 4 to rank 3) since the functions
+  # receive rank 3 tensor for image
+  if 'image' in tensor_dict:
+    images = tensor_dict['image']
+    if len(images.get_shape()) != 4:
+      raise ValueError('images in tensor_dict should be rank 4')
+    image = tf.squeeze(images, squeeze_dims=[0])
+    # resize image
+    image = resize_image(image, new_height=im_height, new_width=im_width)
+    # preprocess pixels
+    image = _preprocess_pixel_value(image)
+    tensor_dict['image'] = image
+
+  # Preprocess inputs based on preprocess_options
+  for option in preprocess_options:
+    func, params = preprocess_options_map[option]
+    if func not in func_arg_map:
+      raise ValueError('The function %s does not exist in func_arg_map' %
+                       (func.__name__))
+    arg_names = func_arg_map[func]
+    for a in arg_names:
+      if a is not None and a not in tensor_dict:
+        raise ValueError('The function %s requires argument %s' %
+                         (func.__name__, a))
+
+    def get_arg(key):
+      return tensor_dict[key] if key is not None else None
+    args = [get_arg(a) for a in arg_names]
+    results = func(*args, **params)
+    if not isinstance(results, (list, tuple)):
+      results = (results,)
+    # Removes None args since the return values will not contain those.
+    arg_names = [arg_name for arg_name in arg_names if arg_name is not None]
+    for res, arg_name in zip(results, arg_names):
+      tensor_dict[arg_name] = res
+
+  # changes the image to images (rank 3 to rank 4) to be compatible to what
+  # we received in the first place
+  if 'image' in tensor_dict:
+    image = tensor_dict['image']
+    images = tf.expand_dims(image, 0)
+    tensor_dict['image'] = images
+
+  return tensor_dict

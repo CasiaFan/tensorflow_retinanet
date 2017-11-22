@@ -29,8 +29,7 @@ def input_queue_generator(input_reader_config):
     # input image (convert to float32 type)
     tensor_dict['image'] = tf.to_float(tf.expand_dims(tensor_dict['image'], 0))
     if input_reader_config.data_augmentation_ops:
-        tensor_dict = preprocess(tensor_dict, input_reader_config.im_height, input_reader_config.im_width,
-                                 input_reader_config.data_augmentation_ops)
+        tensor_dict = preprocess(tensor_dict, input_reader_config.data_augmentation_ops)
     input_queue = BatchQueue(
         tensor_dict,
         batch_size=input_reader_config.batch_size,
