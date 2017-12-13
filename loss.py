@@ -4,7 +4,7 @@ slim = tf.contrib.slim
 
 def focal_loss(onehot_labels, cls_preds,
                             alpha=0.25, gamma=2.0, name=None, scope=None):
-    """Compute softmax focal loss between logits and onehot labels
+    """Compute sigmoid focal loss between logits and onehot labels
 
     logits and onehot_labels must have same shape [batchsize, num_classes] and
     the same data type (float16, 32, 64)
@@ -26,7 +26,7 @@ def focal_loss(onehot_labels, cls_preds,
         precise_logits = tf.cast(logits, tf.float32) if (
                         logits.dtype == tf.float16) else logits
         onehot_labels = tf.cast(onehot_labels, precise_logits.dtype)
-        predictions = tf.nn.sigmoid(logits)
+        predictions = tf.nn.sigmoid(precise_logits)
         predictions_pt = tf.where(tf.equal(onehot_labels, 1), predictions, 1.-predictions)
         # add small value to avoid 0
         epsilon = 1e-8
