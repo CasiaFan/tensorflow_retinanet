@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
-"""box coder following Faster RCNN procedure.
+"""Faster RCNN box coder.
 
 Faster RCNN box coder follows the coding schema described below:
   ty = (y - ya) / ha
@@ -30,30 +30,13 @@ Faster RCNN box coder follows the coding schema described below:
 
 import tensorflow as tf
 
-from anchor import box_list
+from object_detection import box_coder
+from object_detection import box_list
 
 EPSILON = 1e-8
 
-def get_center_coordinates_and_sizes(box_corners, scope=None):
-    """Computes the center coordinates, height and width of the boxes.
 
-    Args:
-      box_corners: Tensor of N boxes
-      scope: name scope of the function.
-
-    Returns:
-      a list of 4 1-D tensors [ycenter, xcenter, height, width].
-    """
-    with tf.name_scope(scope, 'get_center_coordinates_and_sizes'):
-      ymin, xmin, ymax, xmax = tf.unstack(tf.transpose(box_corners))
-      width = xmax - xmin
-      height = ymax - ymin
-      ycenter = ymin + height / 2.
-      xcenter = xmin + width / 2.
-      return [ycenter, xcenter, height, width]
-
-
-class FasterRCNNBoxCoder():
+class FasterRcnnBoxCoder(box_coder.BoxCoder):
   """Faster RCNN box coder."""
 
   def __init__(self, scale_factors=None):
@@ -74,20 +57,20 @@ class FasterRCNNBoxCoder():
   def code_size(self):
     return 4
 
-  def encode(self, boxes, anchors):
+  def _encode(self, boxes, anchors):
     """Encode a box collection with respect to anchor collection.
 
     Args:
-      boxes: Tensor holding N boxes to be encoded.
-      anchors: Tensor of corresponding N anchors.
+      boxes: BoxList holding N boxes to be encoded.
+      anchors: BoxList of anchors.
 
     Returns:
       a tensor representing N anchor-encoded boxes of the format
       [ty, tx, th, tw].
     """
     # Convert anchors to the center coordinate representation.
-    ycenter_a, xcenter_a, ha, wa = get_center_coordinates_and_sizes(anchors)
-    ycenter, xcenter, h, w = get_center_coordinates_and_sizes(boxes)
+    ycenter_a, xcenter_a, ha, wa = anchors.get_center_coordinates_and_sizes()
+    ycenter, xcenter, h, w = boxes.get_center_coordinates_and_sizes()
     # Avoid NaN in division and log below.
     ha += EPSILON
     wa += EPSILON
@@ -106,7 +89,7 @@ class FasterRCNNBoxCoder():
       tw *= self._scale_factors[3]
     return tf.transpose(tf.stack([ty, tx, th, tw]))
 
-  def decode(self, rel_codes, anchors):
+  def _decode(self, rel_codes, anchors):
     """Decode relative codes to boxes.
 
     Args:
@@ -116,7 +99,7 @@ class FasterRCNNBoxCoder():
     Returns:
       boxes: BoxList holding N bounding boxes.
     """
-    ycenter_a, xcenter_a, ha, wa = get_center_coordinates_and_sizes(anchors)
+    ycenter_a, xcenter_a, ha, wa = anchors.get_center_coordinates_and_sizes()
 
     ty, tx, th, tw = tf.unstack(tf.transpose(rel_codes))
     if self._scale_factors:
