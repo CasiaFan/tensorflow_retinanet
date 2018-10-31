@@ -10,7 +10,7 @@ FPN: input shape [batch, 224, 224, 3]
                                     is_training=False)
 """
 import tensorflow as tf
-
+from object_detection.shape_utils import combined_static_and_dynamic_shape
 
 BN_PARAMS = {"bn_decay": 0.997,
              "bn_epsilon": 0.001}
@@ -31,28 +31,28 @@ def nearest_neighbor_upsampling(input_tensor, scale):
         upsample_input: A float32 tensor of size [batch, height_in*scale, width_in*scale, channels].
     """
     with tf.name_scope('nearest_neighbor_upsampling'):
-        (batch_size, h, w, c) = input_tensor.get_shape().as_list()
+        (batch_size, h, w, c) = combined_static_and_dynamic_shape(input_tensor)
         output_tensor = tf.reshape(input_tensor, [batch_size, h, 1, w, 1, c]) * tf.ones(
                 [1, 1, scale, 1, scale, 1], dtype=input_tensor.dtype)
         return tf.reshape(output_tensor, [batch_size, h*scale, w*scale, c])
 
 
 def conv2d_same(inputs, depth, kernel_size, strides, scope=None):
-    if strides == 1:
-        return tf.layers.conv2d(inputs, depth, kernel_size, padding='SAME', scope=scope)
-    else:
-        pad_total = kernel_size - 1
-        pad_beg = pad_total // 2
-        pad_end = pad_total - pad_beg
-        inputs = tf.pad(inputs, [[0, 0], [pad_beg, pad_end], [pad_beg, pad_end], [0, 0]])
-        return tf.layers.conv2d(inputs,
-                                depth,
-                                kernel_size,
-                                strides=strides,
-                                padding='VALID',
-                                use_bias=False,
-                                kernel_initializer=tf.variance_scaling_initializer(),
-                                scope=scope)
+    with tf.name_scope(scope, None):
+        if strides == 1:
+            return tf.layers.conv2d(inputs, depth, kernel_size, padding='SAME')
+        else:
+            pad_total = kernel_size - 1
+            pad_beg = pad_total // 2
+            pad_end = pad_total - pad_beg
+            inputs = tf.pad(inputs, [[0, 0], [pad_beg, pad_end], [pad_beg, pad_end], [0, 0]])
+            return tf.layers.conv2d(inputs,
+                                    depth,
+                                    kernel_size,
+                                    strides=strides,
+                                    padding='VALID',
+                                    use_bias=False,
+                                    kernel_initializer=tf.variance_scaling_initializer())
 
 
 def _bn(inputs, is_training, name=None):
@@ -142,7 +142,7 @@ def retinanet_fpn(inputs,
 
         # Bottom up
         # block 1, down-sampling is done in conv3_1, conv4_1, conv5_1
-        p2 = stack_bottleneck(net, layers=block_layers[0], depth=64, strides=2, is_training=is_training)
+        p2 = stack_bottleneck(net, layers=block_layers[0], depth=64, strides=1, is_training=is_training)
         # block 2
         p3 = stack_bottleneck(p2, layers=block_layers[1], depth=128, strides=2, is_training=is_training)
         # block 3
@@ -152,30 +152,31 @@ def retinanet_fpn(inputs,
         p5 = tf.identity(p5, name="p5")
         # coarser FPN feature
         # p6
-        p6 = conv2d_same(p5, depth=depth, kernel_size=3, strides=2, scope='conv6')
+        p6 = tf.layers.conv2d(p5, filters=depth, kernel_size=3, strides=2, name='conv6', padding='SAME')
         p6 = _bn(p6, is_training)
         p6 = tf.nn.relu6(p6)
         p6 = tf.identity(p6, name="p6")
         # P7
-        p7 = conv2d_same(p6, depth=depth, kernel_size=3, strides=2, scope='conv7')
+        p7 = tf.layers.conv2d(p6, filters=depth, kernel_size=3, strides=2, name='conv7', padding='SAME')
         p7 = _bn(p7, is_training)
         p7 = tf.identity(p7, name="p7")
 
         # lateral layer
-        l3 = conv2d_same(p3, depth=depth, kernel_size=1, strides=1, scope='l3')
-        l4 = conv2d_same(p4, depth=depth, kernel_size=1, strides=1, scope='l4')
+        l3 = tf.layers.conv2d(p3, filters=depth, kernel_size=1, strides=1, name='l3', padding='SAME')
+        l4 = tf.layers.conv2d(p4, filters=depth, kernel_size=1, strides=1, name='l4', padding='SAME')
+        l5 = tf.layers.conv2d(p5, filters=depth, kernel_size=1, strides=1, name='l5', padding='SAME')
         # Top down
-        t4 = nearest_neighbor_upsampling(p5, 2) + l4
-        p4 = conv2d_same(t4, depth=depth, kernel_size=3, strides=1, scope='t4')
+        t4 = nearest_neighbor_upsampling(l5, 2) + l4
+        p4 = tf.layers.conv2d(t4, filters=depth, kernel_size=3, strides=1, name='t4', padding='SAME')
         p4 = _bn(p4, is_training)
         p4 = tf.identity(p4, name="p4")
         t3 = nearest_neighbor_upsampling(t4, 2) + l3
-        p3 = conv2d_same(t3, depth=3, kernel_size=3, strides=1, scope='t3')
+        p3 = tf.layers.conv2d(t3, filters=depth, kernel_size=3, strides=1, name='t3', padding='SAME')
         p3 = _bn(p3, is_training)
         p3 = tf.identity(p3, name="p3")
         features = {3: p3,
                     4: p4,
-                    5: p5,
+                    5: l5,
                     6: p6,
                     7: p7}
         return features
@@ -190,7 +191,7 @@ def share_weight_class_net(inputs, level, num_classes, num_anchors_per_loc, num_
         level: which feature map
         num_classes: number of predicted classes
         num_anchors_per_loc: number of anchors at each spatial location in feature map
-        num_layers_before_predictor: numer of the additional conv layers before the predictor.
+        num_layers_before_predictor: number of the additional conv layers before the predictor.
         is_training: is in training or not
     returns:
         feature with shape (batch_size, h, w, num_classes*num_anchors)
@@ -201,9 +202,9 @@ def share_weight_class_net(inputs, level, num_classes, num_anchors_per_loc, num_
                                   padding="SAME",
                                   name='class_{}'.format(i))
         inputs = _bn(inputs, is_training, name="class_{}_bn_level_{}".format(i, level))
-        inputs = tf.nn.relu6(inputs)
+        inputs = tf.nn.relu(inputs)
     outputs = tf.layers.conv2d(inputs,
-                               filter=num_classes*num_anchors_per_loc,
+                               filters=num_classes*num_anchors_per_loc,
                                kernel_size=3,
                                kernel_initializer=tf.random_normal_initializer(stddev=0.01),
                                padding="SAME",
@@ -223,7 +224,7 @@ def share_weight_box_net(inputs, level, num_anchors_per_loc, num_layers_before_p
         inputs = _bn(inputs, is_training, name="box_{}_bn_level_{}".format(i, level))
         inputs = tf.nn.relu6(inputs)
     outputs = tf.layers.conv2d(inputs,
-                               filter=4*num_anchors_per_loc,
+                               filters=4*num_anchors_per_loc,
                                kernel_size=3,
                                kernel_initializer=tf.random_normal_initializer(stddev=0.01),
                                padding="SAME",
@@ -241,26 +242,33 @@ def retinanet(images, num_classes, num_anchors_per_loc, resnet_arch='resnet50', 
         resnet_arch: name of which resnet architecture used
         is_training: indicate training or not
     return:
-        list of box_predictions tensor from each feature map with shape (batch_size, num_anchors, 4)
-        list of class_predictions tensor from each feature map with shape (batch_size, num_anchors, num_class)
+        prediciton dict: holding following items:
+            box_predictions tensor from each feature map with shape (batch_size, num_anchors, 4)
+            class_predictions_with_bg tensor from each feature map with shape (batch_size, num_anchors, num_class+1)
+            feature_maps: list of tensor of feature map
     """
     assert resnet_arch in list(RESNET_ARCH_BLOCK.keys()), "resnet architecture not defined"
     with tf.variable_scope('retinanet'):
-        batch_size = images.get_shape().as_list()[0]
+        batch_size = combined_static_and_dynamic_shape(images)[0]
         features = retinanet_fpn(images, block_layers=RESNET_ARCH_BLOCK[resnet_arch], is_training=is_training)
         class_pred = []
         box_pred = []
+        feature_map_list = []
+        num_slots = num_classes + 1
         with tf.variable_scope('class_net', reuse=tf.AUTO_REUSE):
             for level in features.keys():
                 class_outputs = share_weight_class_net(features[level], level,
-                                                       num_classes,
+                                                       num_slots,
                                                        num_anchors_per_loc,
                                                        is_training=is_training)
-                class_outputs = tf.reshape(class_outputs, [batch_size, -1, num_classes])
+                class_outputs = tf.reshape(class_outputs, shape=[batch_size, -1, num_slots])
                 class_pred.append(class_outputs)
+                feature_map_list.append(features[level])
         with tf.variable_scope('box_net', reuse=tf.AUTO_REUSE):
             for level in features.keys():
                 box_outputs = share_weight_box_net(features[level], level, num_anchors_per_loc, is_training=is_training)
                 box_outputs = tf.reshape(box_outputs, shape=[batch_size, -1, 4])
                 box_pred.append(box_outputs)
-        return class_pred, box_pred
+        return dict(box_pred=tf.concat(box_pred, axis=1),
+                    cls_pred=tf.concat(class_pred, axis=1),
+                    feature_map_list=feature_map_list)

@@ -40,9 +40,9 @@ back to rank 4.
 """
 
 import tensorflow as tf
-
+import sys
 from object_detection import box_list
-
+from object_detection import box_list_ops
 
 def _flip_boxes_left_right(boxes):
   """Left-right flip the boxes.
@@ -392,25 +392,6 @@ def box_list_scale(boxlist, y_scale, x_scale, scope=None):
     return _copy_extra_fields(scaled_boxlist, boxlist)
 
 
-def keypoint_scale(keypoints, y_scale, x_scale, scope=None):
-  """Scales keypoint coordinates in x and y dimensions.
-
-  Args:
-    keypoints: a tensor of shape [num_instances, num_keypoints, 2]
-    y_scale: (float) scalar tensor
-    x_scale: (float) scalar tensor
-    scope: name scope.
-
-  Returns:
-    new_keypoints: a tensor of shape [num_instances, num_keypoints, 2]
-  """
-  with tf.name_scope(scope, 'Scale'):
-    y_scale = tf.cast(y_scale, tf.float32)
-    x_scale = tf.cast(x_scale, tf.float32)
-    new_keypoints = keypoints * [[[y_scale, x_scale]]]
-    return new_keypoints
-
-
 def scale_boxes_to_pixel_coordinates(image, boxes, keypoints=None):
   """Scales boxes from normalized to pixel coordinates.
 
@@ -436,26 +417,109 @@ def scale_boxes_to_pixel_coordinates(image, boxes, keypoints=None):
   image_width = tf.shape(image)[1]
   scaled_boxes = box_list_scale(boxlist, image_height, image_width).get()
   result = [image, scaled_boxes]
-  if keypoints is not None:
-    scaled_keypoints = keypoint_scale(keypoints, image_height, image_width)
-    result.append(scaled_keypoints)
   return tuple(result)
+
+
+
+def _strict_random_crop_image(image,
+                              boxes,
+                              labels,
+                              min_object_covered=1.0,
+                              aspect_ratio_range=(0.75, 1.33),
+                              area_range=(0.1, 1.0),
+                              overlap_thresh=0.3):
+  """Performs random crop.
+
+  Note: boxes will be clipped to the crop. Keypoint coordinates that are
+  outside the crop will be set to NaN, which is consistent with the original
+  keypoint encoding for non-existing keypoints. This function always crops
+  the image and is supposed to be used by `random_crop_image` function which
+  sometimes returns image unchanged.
+
+  Args:
+    image: rank 3 float32 tensor containing 1 image -> [height, width, channels]
+           with pixel values varying between [0, 1].
+    boxes: rank 2 float32 tensor containing the bounding boxes with shape
+           [num_instances, 4].
+           Boxes are in normalized form meaning their coordinates vary
+           between [0, 1].
+           Each row is in the form of [ymin, xmin, ymax, xmax].
+    labels: rank 1 int32 tensor containing the object classes.
+    min_object_covered: the cropped image must cover at least this fraction of
+                        at least one of the input bounding boxes.
+    aspect_ratio_range: allowed range for aspect ratio of cropped image.
+    area_range: allowed range for area ratio between cropped image and the
+                original image.
+    overlap_thresh: minimum overlap thresh with new cropped
+                    image to keep the box.
+
+  Returns:
+    image: image which is the same rank as input image.
+    boxes: boxes which is the same rank as input boxes.
+           Boxes are in normalized form.
+    labels: new labels.
+
+    If label_scores, multiclass_scores, masks, or keypoints is not None, the
+    function also returns:
+    label_scores: rank 1 float32 tensor with shape [num_instances].
+  """
+  with tf.name_scope('RandomCropImage', values=[image, boxes]):
+    image_shape = tf.shape(image)
+
+    # boxes are [N, 4]. Lets first make them [N, 1, 4].
+    boxes_expanded = tf.expand_dims(
+        tf.clip_by_value(
+            boxes, clip_value_min=0.0, clip_value_max=1.0), 1)
+    im_box_begin, im_box_size, im_box = tf.image.sample_distorted_bounding_box(image_shape,
+                                                                               bounding_boxes=boxes_expanded,
+                                                                               min_object_covered=min_object_covered,
+                                                                               aspect_ratio_range=aspect_ratio_range,
+                                                                               area_range=area_range,
+                                                                               max_attempts=100,
+                                                                               use_image_if_no_bounding_boxes=True)
+
+    new_image = tf.slice(image, im_box_begin, im_box_size)
+    new_image.set_shape([None, None, image.get_shape()[2]])
+
+    # [1, 4]
+    im_box_rank2 = tf.squeeze(im_box, squeeze_dims=[0])
+    # [4]
+    im_box_rank1 = tf.squeeze(im_box)
+
+    boxlist = box_list.BoxList(boxes)
+    boxlist.add_field('labels', labels)
+
+    im_boxlist = box_list.BoxList(im_box_rank2)
+
+    # remove boxes that are outside cropped image
+    boxlist, inside_window_ids = box_list_ops.prune_completely_outside_window(
+        boxlist, im_box_rank1)
+
+    # remove boxes that are outside image
+    overlapping_boxlist, keep_ids = box_list_ops.prune_non_overlapping_boxes(
+        boxlist, im_boxlist, overlap_thresh)
+
+    # change the coordinate of the remaining boxes
+    new_labels = overlapping_boxlist.get_field('labels')
+    new_boxlist = box_list_ops.change_coordinate_frame(overlapping_boxlist,
+                                                       im_box_rank1)
+    new_boxes = new_boxlist.get()
+    new_boxes = tf.clip_by_value(
+        new_boxes, clip_value_min=0.0, clip_value_max=1.0)
+
+    result = [new_image, new_boxes, new_labels]
+    return tuple(result)
 
 
 def random_crop_image(image,
                       boxes,
                       labels,
-                      label_scores=None,
-                      multiclass_scores=None,
-                      masks=None,
-                      keypoints=None,
                       min_object_covered=0.0,
                       aspect_ratio_range=(0.75, 3.0),
                       area_range=(0.75, 1.0),
                       overlap_thresh=0.0,
                       random_coef=0.0,
-                      seed=None,
-                      preprocess_vars_cache=None):
+                      seed=None):
   """Randomly crops the image.
 
   Given the input image and its bounding boxes, this op randomly
@@ -480,17 +544,6 @@ def random_crop_image(image,
            between [0, 1].
            Each row is in the form of [ymin, xmin, ymax, xmax].
     labels: rank 1 int32 tensor containing the object classes.
-    label_scores: (optional) float32 tensor of shape [num_instances].
-      representing the score for each box.
-    multiclass_scores: (optional) float32 tensor of shape
-      [num_instances, num_classes] representing the score for each box for each
-      class.
-    masks: (optional) rank 3 float32 tensor with shape
-           [num_instances, height, width] containing instance masks. The masks
-           are of the same height, width as the input `image`.
-    keypoints: (optional) rank 3 float32 tensor with shape
-               [num_instances, num_keypoints, 2]. The keypoints are in y-x
-               normalized coordinates.
     min_object_covered: the cropped image must cover at least this fraction of
                         at least one of the input bounding boxes.
     aspect_ratio_range: allowed range for aspect ratio of cropped image.
@@ -503,10 +556,6 @@ def random_crop_image(image,
                  cropped image, and if it is 1.0, we will always get the
                  original image.
     seed: random seed.
-    preprocess_vars_cache: PreprocessorCache object that records previously
-                           performed augmentations. Updated in-place. If this
-                           function is called multiple times with the same
-                           non-null cache, it will perform deterministically.
 
   Returns:
     image: Image shape will be [new_height, new_width, channels].
@@ -517,12 +566,6 @@ def random_crop_image(image,
     If label_scores, multiclass_scores, masks, or keypoints is not None, the
     function also returns:
     label_scores: rank 1 float32 tensor with shape [num_instances].
-    multiclass_scores: rank 2 float32 tensor with shape
-                       [num_instances, num_classes]
-    masks: rank 3 float32 tensor with shape [num_instances, height, width]
-           containing instance masks.
-    keypoints: rank 3 float32 tensor with shape
-               [num_instances, num_keypoints, 2]
   """
 
   def strict_random_crop_image_fn():
@@ -530,37 +573,101 @@ def random_crop_image(image,
         image,
         boxes,
         labels,
-        label_scores=label_scores,
-        multiclass_scores=multiclass_scores,
-        masks=masks,
-        keypoints=keypoints,
         min_object_covered=min_object_covered,
         aspect_ratio_range=aspect_ratio_range,
         area_range=area_range,
-        overlap_thresh=overlap_thresh,
-        preprocess_vars_cache=preprocess_vars_cache)
+        overlap_thresh=overlap_thresh)
 
   # avoids tf.cond to make faster RCNN training on borg. See b/140057645.
   if random_coef < sys.float_info.min:
     result = strict_random_crop_image_fn()
   else:
-    generator_func = functools.partial(tf.random_uniform, [], seed=seed)
-    do_a_crop_random = _get_or_create_preprocess_rand_vars(
-        generator_func, preprocessor_cache.PreprocessorCache.CROP_IMAGE,
-        preprocess_vars_cache)
+    do_a_crop_random = tf.random_uniform([], seed=seed)
     do_a_crop_random = tf.greater(do_a_crop_random, random_coef)
 
     outputs = [image, boxes, labels]
 
-    if label_scores is not None:
-      outputs.append(label_scores)
-    if multiclass_scores is not None:
-      outputs.append(multiclass_scores)
-    if masks is not None:
-      outputs.append(masks)
-    if keypoints is not None:
-      outputs.append(keypoints)
-
     result = tf.cond(do_a_crop_random, strict_random_crop_image_fn,
                      lambda: tuple(outputs))
   return result
+
+
+def _get_or_create_preprocess_rand_vars(generator_func,
+                                        function_id,
+                                        preprocess_vars_cache,
+                                        key=''):
+  """Returns a tensor stored in preprocess_vars_cache or using generator_func.
+
+  If the tensor was previously generated and appears in the PreprocessorCache,
+  the previously generated tensor will be returned. Otherwise, a new tensor
+  is generated using generator_func and stored in the cache.
+
+  Args:
+    generator_func: A 0-argument function that generates a tensor.
+    function_id: identifier for the preprocessing function used.
+    preprocess_vars_cache: PreprocessorCache object that records previously
+                           performed augmentations. Updated in-place. If this
+                           function is called multiple times with the same
+                           non-null cache, it will perform deterministically.
+    key: identifier for the variable stored.
+  Returns:
+    The generated tensor.
+  """
+  if preprocess_vars_cache is not None:
+    var = preprocess_vars_cache.get(function_id, key)
+    if var is None:
+      var = generator_func()
+      preprocess_vars_cache.update(function_id, key, var)
+  else:
+    var = generator_func()
+  return var
+
+
+def random_adjust_brightness(image,
+                             max_delta=0.2,
+                             seed=None):
+  """Randomly adjusts brightness.
+
+  Makes sure the output image is still between 0 and 255.
+
+  Args:
+    image: rank 3 float32 tensor contains 1 image -> [height, width, channels]
+           with pixel values varying between [0, 255].
+    max_delta: how much to change the brightness. A value between [0, 1).
+    seed: random seed.
+
+  Returns:
+    image: image which is the same shape as input image.
+    boxes: boxes which is the same shape as input boxes.
+  """
+  with tf.name_scope('RandomAdjustBrightness', values=[image]):
+    delta = tf.random_uniform([], -max_delta, max_delta, seed=seed, dtype=tf.float32)
+    image = tf.image.adjust_brightness(image / 255, delta) * 255
+    image = tf.clip_by_value(image, clip_value_min=0.0, clip_value_max=255.0)
+    return image
+
+
+def random_adjust_saturation(image,
+                             min_delta=0.8,
+                             max_delta=1.25,
+                             seed=None):
+  """Randomly adjusts saturation.
+
+  Makes sure the output image is still between 0 and 255.
+
+  Args:
+    image: rank 3 float32 tensor contains 1 image -> [height, width, channels]
+           with pixel values varying between [0, 255].
+    min_delta: see max_delta.
+    max_delta: how much to change the saturation. Saturation will change with a
+               value between min_delta and max_delta. This value will be
+               multiplied to the current saturation of the image.
+    seed: random seed.
+  Returns:
+    image: image which is the same shape as input image.
+  """
+  with tf.name_scope('RandomAdjustSaturation', values=[image]):
+    saturation_factor = tf.random_uniform([], min_delta, max_delta, seed=seed)
+    image = tf.image.adjust_saturation(image / 255, saturation_factor) * 255
+    image = tf.clip_by_value(image, clip_value_min=0.0, clip_value_max=255.0)
+    return image
