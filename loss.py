@@ -48,8 +48,3 @@ def regression_loss(pred_boxes, gt_boxes, weights, delta=1.0):
     return loss
 
 
-onehot_labels = tf.constant([[1 ,0], [1, 0]], tf.float32)
-logits = tf.constant([[290, -500], [10, -2]], tf.float32)
-ce = tf.nn.sigmoid_cross_entropy_with_logits(labels=onehot_labels, logits=logits)
-with tf.Session() as sess:
-    print(sess.run(ce))

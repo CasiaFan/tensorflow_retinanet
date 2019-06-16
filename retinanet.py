@@ -10,10 +10,12 @@ FPN: input shape [batch, 224, 224, 3]
                                     is_training=False)
 """
 import tensorflow as tf
-from object_detection.shape_utils import combined_static_and_dynamic_shape
+import math
+from object_detection.utils.shape_utils import combined_static_and_dynamic_shape
 
+# tf.enable_eager_execution()
 BN_PARAMS = {"bn_decay": 0.997,
-             "bn_epsilon": 0.001}
+             "bn_epsilon": 1e-4}
 
 
 # define number of layers of each block for different architecture
@@ -55,13 +57,22 @@ def conv2d_same(inputs, depth, kernel_size, strides, scope=None):
                                     kernel_initializer=tf.variance_scaling_initializer())
 
 
-def _bn(inputs, is_training, name=None):
-    return tf.layers.batch_normalization(inputs,
-                                         training=is_training,
-                                         momentum=BN_PARAMS["bn_decay"],
-                                         epsilon=BN_PARAMS["bn_epsilon"],
-                                         scale=True,
-                                         name=name)
+def bn_with_relu(inputs, is_training, relu=True, init_zero=False, name=None):
+    if not init_zero:
+        gamma_init = tf.ones_initializer()
+    else:
+        gamma_init = tf.zeros_initializer()
+    inputs = tf.layers.batch_normalization(inputs,
+                                           training=is_training,
+                                           momentum=BN_PARAMS["bn_decay"],
+                                           epsilon=BN_PARAMS["bn_epsilon"],
+                                           scale=True,
+                                           fused=True,
+                                           gamma_initializer=gamma_init,
+                                           name=name)
+    if relu:
+        inputs = tf.nn.relu(inputs)
+    return inputs
 
 
 def bottleneck(inputs, depth, strides, is_training, projection=False, scope=None):
@@ -87,21 +98,18 @@ def bottleneck(inputs, depth, strides, is_training, projection=False, scope=None
         depth_out = depth * 4
         if projection:
             shortcut = conv2d_same(shortcut, depth_out, kernel_size=1, strides=strides, scope='shortcut')
-            shortcut = _bn(shortcut, is_training)
-
+            shortcut = bn_with_relu(shortcut, is_training, relu=False)
         # layer1
         residual = conv2d_same(inputs, depth, kernel_size=1, strides=1, scope='conv1')
-        residual = _bn(residual, is_training)
-        residual = tf.nn.relu6(residual)
+        residual = bn_with_relu(residual, is_training)
         # layer 2
         residual = conv2d_same(residual, depth, kernel_size=3, strides=strides, scope='conv2')
-        residual = _bn(residual, is_training)
-        residual = tf.nn.relu6(residual)
+        residual = bn_with_relu(residual, is_training)
         # layer 3
         residual = conv2d_same(residual, depth_out, kernel_size=1, strides=1, scope='conv3')
-        residual = _bn(residual, is_training)
+        residual = bn_with_relu(residual, is_training, relu=False, init_zero=True)
         output = shortcut + residual
-        return tf.nn.relu6(output)
+        return tf.nn.relu(output)
 
 
 def stack_bottleneck(inputs, layers, depth, strides, is_training, scope=None):
@@ -136,10 +144,8 @@ def retinanet_fpn(inputs,
     """
     with tf.variable_scope(scope, 'retinanet_fpn', [inputs]) as sc:
         net = conv2d_same(inputs, 64, kernel_size=7, strides=2, scope='conv1')
-        net = _bn(net, is_training)
-        net = tf.nn.relu6(net)
+        net = bn_with_relu(net, is_training)
         net = tf.layers.max_pooling2d(net, pool_size=3, strides=2, padding='SAME', name='pool1')
-
         # Bottom up
         # block 1, down-sampling is done in conv3_1, conv4_1, conv5_1
         p2 = stack_bottleneck(net, layers=block_layers[0], depth=64, strides=1, is_training=is_training)
@@ -149,36 +155,38 @@ def retinanet_fpn(inputs,
         p4 = stack_bottleneck(p3, layers=block_layers[2], depth=256, strides=2, is_training=is_training)
         # block 4
         p5 = stack_bottleneck(p4, layers=block_layers[3], depth=512, strides=2, is_training=is_training)
-        p5 = tf.identity(p5, name="p5")
-        # coarser FPN feature
-        # p6
-        p6 = tf.layers.conv2d(p5, filters=depth, kernel_size=3, strides=2, name='conv6', padding='SAME')
-        p6 = _bn(p6, is_training)
-        p6 = tf.nn.relu6(p6)
-        p6 = tf.identity(p6, name="p6")
-        # P7
-        p7 = tf.layers.conv2d(p6, filters=depth, kernel_size=3, strides=2, name='conv7', padding='SAME')
-        p7 = _bn(p7, is_training)
-        p7 = tf.identity(p7, name="p7")
-
         # lateral layer
         l3 = tf.layers.conv2d(p3, filters=depth, kernel_size=1, strides=1, name='l3', padding='SAME')
         l4 = tf.layers.conv2d(p4, filters=depth, kernel_size=1, strides=1, name='l4', padding='SAME')
         l5 = tf.layers.conv2d(p5, filters=depth, kernel_size=1, strides=1, name='l5', padding='SAME')
         # Top down
-        t4 = nearest_neighbor_upsampling(l5, 2) + l4
-        p4 = tf.layers.conv2d(t4, filters=depth, kernel_size=3, strides=1, name='t4', padding='SAME')
-        p4 = _bn(p4, is_training)
-        p4 = tf.identity(p4, name="p4")
-        t3 = nearest_neighbor_upsampling(t4, 2) + l3
-        p3 = tf.layers.conv2d(t3, filters=depth, kernel_size=3, strides=1, name='t3', padding='SAME')
-        p3 = _bn(p3, is_training)
-        p3 = tf.identity(p3, name="p3")
+        p4 = nearest_neighbor_upsampling(l5, 2) + l4
+        p3 = nearest_neighbor_upsampling(p4, 2) + l3
+        # add post-hoc conv layers
+        p3 = tf.layers.conv2d(p3, filters=depth, kernel_size=3, strides=1, padding='SAME', name='post-hoc-d3')
+        p4 = tf.layers.conv2d(p4, filters=depth, kernel_size=3, strides=1, padding='SAME', name='post-hoc-d4')
+        p5 = tf.layers.conv2d(l5, filters=depth, kernel_size=3, strides=1, padding='SAME', name='post-hoc-d5')
+        # coarse layer: 6, 7
+        # p6
+        p6 = tf.layers.conv2d(p5, filters=depth, kernel_size=3, strides=2, name='conv6', padding='SAME')
+        p6 = tf.nn.relu(p6)
+        # P7
+        p7 = tf.layers.conv2d(p6, filters=depth, kernel_size=3, strides=2, name='conv7', padding='SAME')
+        # add normalization to each layer
         features = {3: p3,
                     4: p4,
                     5: l5,
                     6: p6,
                     7: p7}
+        for layer in features:
+            features[layer] = tf.layers.batch_normalization(features[layer],
+                                                            training=is_training,
+                                                            momentum=BN_PARAMS["bn_decay"],
+                                                            epsilon=BN_PARAMS["bn_epsilon"],
+                                                            center=True,
+                                                            scale=True,
+                                                            fused=True,
+                                                            name='p{}-bn'.format(layer))
         return features
 
 
@@ -199,13 +207,14 @@ def share_weight_class_net(inputs, level, num_classes, num_anchors_per_loc, num_
     for i in range(num_layers_before_predictor):
         inputs = tf.layers.conv2d(inputs, filters=256, kernel_size=3, strides=1,
                                   kernel_initializer=tf.random_normal_initializer(stddev=0.01),
+                                  bias_initializer=tf.zeros_initializer(),
                                   padding="SAME",
                                   name='class_{}'.format(i))
-        inputs = _bn(inputs, is_training, name="class_{}_bn_level_{}".format(i, level))
-        inputs = tf.nn.relu(inputs)
+        inputs = bn_with_relu(inputs, is_training, relu=True, init_zero=False, name="class_{}_bn_level_{}".format(i, level))
     outputs = tf.layers.conv2d(inputs,
                                filters=num_classes*num_anchors_per_loc,
                                kernel_size=3,
+                               bias_initializer=tf.constant_initializer(-math.log((1 - 0.01) / 0.01)),
                                kernel_initializer=tf.random_normal_initializer(stddev=0.01),
                                padding="SAME",
                                name="class_pred")
@@ -218,11 +227,11 @@ def share_weight_box_net(inputs, level, num_anchors_per_loc, num_layers_before_p
     """
     for i in range(num_layers_before_predictor):
         inputs = tf.layers.conv2d(inputs, filters=256, kernel_size=3, strides=1,
+                                  bias_initializer=tf.zeros_initializer(),
                                   kernel_initializer=tf.random_normal_initializer(stddev=0.01),
                                   padding="SAME",
                                   name='box_{}'.format(i))
-        inputs = _bn(inputs, is_training, name="box_{}_bn_level_{}".format(i, level))
-        inputs = tf.nn.relu6(inputs)
+        inputs = bn_with_relu(inputs, is_training, relu=True, init_zero=False, name="box_{}_bn_level_{}".format(i, level))
     outputs = tf.layers.conv2d(inputs,
                                filters=4*num_anchors_per_loc,
                                kernel_size=3,
@@ -272,3 +281,4 @@ def retinanet(images, num_classes, num_anchors_per_loc, resnet_arch='resnet50', 
         return dict(box_pred=tf.concat(box_pred, axis=1),
                     cls_pred=tf.concat(class_pred, axis=1),
                     feature_map_list=feature_map_list)
+
