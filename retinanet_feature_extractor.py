@@ -23,7 +23,7 @@ from object_detection.meta_architectures import ssd_meta_arch
 from object_detection.utils import context_manager
 from object_detection.utils import ops
 from object_detection.utils import shape_utils
-from object_detection.retinanet import retinanet_fpn
+from object_detection.models.retinanet import retinanet_fpn
 
 RESNET_ARCH_BLOCK = {"resnet50": [3, 4, 6, 3],
                      "resnet101": [3, 4, 23, 3]}
@@ -132,7 +132,8 @@ class RetinaNetFeatureExtractor(ssd_meta_arch.SSDFeatureExtractor):
                                        block_layers=block_layers,
                                        depth=self._additional_layer_depth,
                                        is_training=self._is_training)
-        return [image_features[x] for x in range(self._min_level, sefl._max_level+1)]
+        return [image_features[x] for x in range(self._min_level, self._max_level+1)]
+
 
 class RetinaNet50FeatureExtractor(RetinaNetFeatureExtractor):
   """Resnet 50 RetinaNet feature extractor."""
@@ -166,14 +167,14 @@ class RetinaNet50FeatureExtractor(RetinaNetFeatureExtractor):
         `conv_hyperparams_fn`.
     """
     super(RetinaNet50FeatureExtractor, self).__init__(
-        is_training,
-        depth_multiplier,
-        min_depth,
-        conv_hyperparams_fn,
-        pad_to_multiple,
-        'resnet50',
-        'retinanet50',
-        additional_layer_depth,
+        is_training=is_training,
+        depth_multiplier=depth_multiplier,
+        min_depth=min_depth,
+        conv_hyperparams_fn=conv_hyperparams_fn,
+        pad_to_multiple=pad_to_multiple,
+        backbone='resnet50',
+        fpn_scope_name='retinanet50',
+        additional_layer_depth=additional_layer_depth,
         reuse_weights=reuse_weights,
         use_explicit_padding=use_explicit_padding,
         use_depthwise=use_depthwise,
@@ -212,14 +213,14 @@ class RetinaNet101FeatureExtractor(RetinaNetFeatureExtractor):
         `conv_hyperparams_fn`.
     """
     super(RetinaNet101FeatureExtractor, self).__init__(
-        is_training,
-        depth_multiplier,
-        min_depth,
-        conv_hyperparams_fn,
-        pad_to_multiple,
-        'resnet101',
-        'retinanet101',
-        additional_layer_depth,
+        is_training=is_training,
+        depth_multiplier=depth_multiplier,
+        min_depth=min_depth,
+        conv_hyperparams_fn=conv_hyperparams_fn,
+        pad_to_multiple=pad_to_multiple,
+        backbone='resnet101',
+        fpn_scope_name='retinanet101',
+        additional_layer_depth=additional_layer_depth,
         reuse_weights=reuse_weights,
         use_explicit_padding=use_explicit_padding,
         use_depthwise=use_depthwise,
